@@ -1,0 +1,39 @@
+## Build and Output Folders
+[Bb]in/
+[Oo]bj/
+[Dd]ist/
+out/
+
+## Visual Studio
+.vs/
+*.user
+*.userprefs
+*.suo
+*.sln.docstates
+*.userosscache
+*.ide/
+
+## Visual Studio Code
+.vscode/
+
+## JetBrains Rider / Resharper
+.idea/
+_ReSharper*/
+*.DotSettings.user
+
+## .NET & NuGet
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+## Logs and diagnostics
+*.log
+*.tlog
+
+## Windows OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/

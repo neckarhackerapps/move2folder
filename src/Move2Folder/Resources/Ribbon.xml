@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui" onLoad="OnRibbonLoad">
+  <ribbon>
+    <tabs>
+      <!-- Explorer (Hauptfenster) -> Registerkarte Start / TabMail -->
+      <tab idMso="TabMail">
+        <group id="grpMove2FolderExplorer" label="Move2Folder">
+          <button id="btnMove2FolderExplorer"
+                  label="{RibbonLabel}"
+                  size="large"
+                  imageMso="MoveToFolder"
+                  screentip="{RibbonScreentip}"
+                  supertip="{RibbonSupertip}"
+                  onAction="OnMove2FolderRibbonClick" />
+        </group>
+      </tab>
+
+      <!-- Inspector (Geöffnete E-Mail im Einzelfenster) -> Registerkarte Nachricht / TabReadMessage -->
+      <tab idMso="TabReadMessage">
+        <group id="grpMove2FolderInspector" label="Move2Folder">
+          <button id="btnMove2FolderInspector"
+                  label="{RibbonLabel}"
+                  size="large"
+                  imageMso="MoveToFolder"
+                  screentip="{RibbonScreentip}"
+                  supertip="{RibbonSupertip}"
+                  onAction="OnMove2FolderRibbonClick" />
+        </group>
+      </tab>
+    </tabs>
+  </ribbon>
+</customUI>
