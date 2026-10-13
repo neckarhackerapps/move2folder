@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Move2Folder.Models;
 using Outlook = Microsoft.Office.Interop.Outlook;
 
@@ -246,7 +247,7 @@ namespace Move2Folder.Services
             }
         }
 
-        private static string DetermineFolderType(string name, bool isStoreRoot, bool isMailFolder)
+        public static string DetermineFolderType(string name, bool isStoreRoot, bool isMailFolder)
         {
             if (isStoreRoot)
                 return "Store";
@@ -470,6 +471,241 @@ namespace Move2Folder.Services
                     Marshal.ReleaseComObject(session);
             }
             return null;
+        }
+
+        public static List<FolderSnapshot> FetchFolderSnapshots(
+            Outlook.Application outlookApp,
+            string? targetStoreId,
+            CancellationToken cancellationToken)
+        {
+            var roots = new List<FolderSnapshot>();
+            Outlook.NameSpace? session = null;
+            Outlook.Folders? sessionFolders = null;
+
+            try
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return roots;
+
+                session = outlookApp.Session;
+                sessionFolders = session.Folders;
+                int rootCount = sessionFolders.Count;
+
+                // Pass 1: If targetStoreId is specified, search for matching store root among session.Folders
+                if (!string.IsNullOrEmpty(targetStoreId))
+                {
+                    for (int i = 1; i <= rootCount; i++)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            return roots;
+
+                        Outlook.MAPIFolder? rootFolder = null;
+                        try
+                        {
+                            rootFolder = sessionFolders[i];
+                            if (string.Equals(rootFolder.StoreID, targetStoreId, StringComparison.OrdinalIgnoreCase))
+                            {
+                                var rootSnap = BuildFolderSnapshot(rootFolder, cancellationToken, isStoreRoot: true);
+                                if (rootSnap != null)
+                                {
+                                    roots.Add(rootSnap);
+                                }
+                                break;
+                            }
+                        }
+                        catch { }
+                        finally
+                        {
+                            if (rootFolder != null)
+                                Marshal.ReleaseComObject(rootFolder);
+                        }
+                    }
+
+                    // If not found in session.Folders, search in session.Stores
+                    if (roots.Count == 0 && !cancellationToken.IsCancellationRequested)
+                    {
+                        Outlook.Stores? stores = null;
+                        try
+                        {
+                            stores = session.Stores;
+                            int storeCount = stores.Count;
+                            for (int s = 1; s <= storeCount; s++)
+                            {
+                                if (cancellationToken.IsCancellationRequested)
+                                    return roots;
+
+                                Outlook.Store? store = null;
+                                Outlook.MAPIFolder? rootFolder = null;
+                                try
+                                {
+                                    store = stores[s];
+                                    if (string.Equals(store.StoreID, targetStoreId, StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        rootFolder = store.GetRootFolder();
+                                        if (rootFolder != null)
+                                        {
+                                            var rootSnap = BuildFolderSnapshot(rootFolder, cancellationToken, isStoreRoot: true);
+                                            if (rootSnap != null)
+                                            {
+                                                roots.Add(rootSnap);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                                catch { }
+                                finally
+                                {
+                                    if (rootFolder != null) Marshal.ReleaseComObject(rootFolder);
+                                    if (store != null) Marshal.ReleaseComObject(store);
+                                }
+                            }
+                        }
+                        catch { }
+                        finally
+                        {
+                            if (stores != null) Marshal.ReleaseComObject(stores);
+                        }
+                    }
+                }
+
+                // Pass 2: Fallback if targetStoreId was not found or not specified: load all stores
+                if (roots.Count == 0 && !cancellationToken.IsCancellationRequested)
+                {
+                    for (int i = 1; i <= rootCount; i++)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            return roots;
+
+                        Outlook.MAPIFolder? rootFolder = null;
+                        try
+                        {
+                            rootFolder = sessionFolders[i];
+                            var rootSnap = BuildFolderSnapshot(rootFolder, cancellationToken, isStoreRoot: true);
+                            if (rootSnap != null)
+                            {
+                                roots.Add(rootSnap);
+                            }
+                        }
+                        catch { }
+                        finally
+                        {
+                            if (rootFolder != null)
+                                Marshal.ReleaseComObject(rootFolder);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error fetching folder snapshots: {ex.Message}");
+            }
+            finally
+            {
+                if (sessionFolders != null)
+                    Marshal.ReleaseComObject(sessionFolders);
+                if (session != null)
+                    Marshal.ReleaseComObject(session);
+            }
+
+            return roots;
+        }
+
+        private static FolderSnapshot? BuildFolderSnapshot(
+            Outlook.MAPIFolder folder,
+            CancellationToken cancellationToken,
+            bool isStoreRoot = false)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return null;
+
+            try
+            {
+                Outlook.OlItemType itemType = folder.DefaultItemType;
+
+                // Only include mail folders or folders that have subfolders
+                Outlook.Folders subFolders = folder.Folders;
+                int subFolderCount = subFolders.Count;
+
+                bool isMailFolder = itemType == Outlook.OlItemType.olMailItem;
+                bool hasSubFolders = subFolderCount > 0;
+
+                // Skip non-mail leaf folders (e.g. Contacts, Calendar, Notes, Tasks)
+                if (!isStoreRoot && !isMailFolder && !hasSubFolders)
+                {
+                    Marshal.ReleaseComObject(subFolders);
+                    return null;
+                }
+
+                string name = folder.Name ?? LocalizationService.UntitledFolder;
+                string entryId = folder.EntryID ?? string.Empty;
+                string storeId = folder.StoreID ?? string.Empty;
+                string fullPath = folder.FolderPath ?? name;
+                string displayPath = fullPath.TrimStart('\\').Replace("\\", " / ");
+
+                var snapshot = new FolderSnapshot
+                {
+                    Name = name,
+                    EntryId = entryId,
+                    StoreId = storeId,
+                    FullPath = fullPath,
+                    DisplayPath = displayPath,
+                    IsStore = isStoreRoot,
+                    FolderType = DetermineFolderType(name, isStoreRoot, isMailFolder)
+                };
+
+                if (subFolderCount > 0)
+                {
+                    for (int i = 1; i <= subFolderCount; i++)
+                    {
+                        if (cancellationToken.IsCancellationRequested)
+                            break;
+
+                        Outlook.MAPIFolder? childFolder = null;
+                        try
+                        {
+                            childFolder = subFolders[i];
+                            var childSnap = BuildFolderSnapshot(childFolder, cancellationToken, isStoreRoot: false);
+                            if (childSnap != null)
+                            {
+                                snapshot.Children.Add(childSnap);
+                            }
+                        }
+                        catch { }
+                        finally
+                        {
+                            if (childFolder != null)
+                                Marshal.ReleaseComObject(childFolder);
+                        }
+                    }
+                }
+
+                Marshal.ReleaseComObject(subFolders);
+                return snapshot;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public void UpdateCacheOnItemAdded(FolderItem item)
+        {
+            foreach (var entry in _cache.Values)
+            {
+                if (!entry.FlatList.Contains(item))
+                {
+                    entry.FlatList.Add(item);
+                }
+            }
+        }
+
+        public void UpdateCacheOnItemRemoved(FolderItem item)
+        {
+            foreach (var entry in _cache.Values)
+            {
+                entry.FlatList.Remove(item);
+            }
         }
     }
 }

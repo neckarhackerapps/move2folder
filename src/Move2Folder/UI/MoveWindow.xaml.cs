@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -22,6 +23,7 @@ namespace Move2Folder.UI
         private ObservableCollection<FolderItem> _roots = new ObservableCollection<FolderItem>();
         private FolderItem? _selectedFolder;
         private readonly UserSettings _settings;
+        private CancellationTokenSource? _refreshCts;
 
         public bool ItemsMoved { get; private set; }
 
@@ -99,6 +101,9 @@ namespace Move2Folder.UI
             SearchTextBox.Text = string.Empty;
             PlaceholderText.Visibility = Visibility.Visible;
             SearchTextBox.Focus();
+
+            // Start background thread that incrementally refreshes the folder tree
+            StartBackgroundFolderRefresh();
         }
 
         private void MoveWindow_Activated(object? sender, EventArgs e)
@@ -113,6 +118,14 @@ namespace Move2Folder.UI
 
         private void MoveWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
+            try
+            {
+                _refreshCts?.Cancel();
+                _refreshCts?.Dispose();
+                _refreshCts = null;
+            }
+            catch { }
+
             _settings.WindowWidth = ActualWidth;
             _settings.WindowHeight = ActualHeight;
             SettingsService.Save(_settings);
@@ -351,6 +364,12 @@ namespace Move2Folder.UI
 
         private void BtnRefresh_Click(object sender, RoutedEventArgs e)
         {
+            try
+            {
+                _refreshCts?.Cancel();
+            }
+            catch { }
+
             LoadFolderData(forceRefresh: true);
             SearchTextBox.Text = string.Empty;
             SelectLastUsedFolder();
@@ -702,5 +721,190 @@ namespace Move2Folder.UI
             }
             return null;
         }
+
+        #region Background Incremental Folder Refresh
+
+        [DllImport("ole32.dll")]
+        private static extern int CoMarshalInterThreadInterfaceInStream(
+            in Guid riid,
+            [MarshalAs(UnmanagedType.IUnknown)] object pUnk,
+            out IntPtr ppStm);
+
+        [DllImport("ole32.dll")]
+        private static extern int CoGetInterfaceAndReleaseStream(
+            IntPtr pStm,
+            in Guid riid,
+            [MarshalAs(UnmanagedType.IUnknown)] out object ppv);
+
+        private static readonly Guid IID_IUnknown = new Guid("00000000-0000-0000-C000-000000000046");
+
+        private void StartBackgroundFolderRefresh()
+        {
+            _refreshCts?.Cancel();
+            _refreshCts?.Dispose();
+            _refreshCts = new CancellationTokenSource();
+            var cancellationToken = _refreshCts.Token;
+
+            IntPtr streamPtr = IntPtr.Zero;
+            try
+            {
+                int hr = CoMarshalInterThreadInterfaceInStream(in IID_IUnknown, _folderService.OutlookApp, out streamPtr);
+                if (hr != 0)
+                {
+                    streamPtr = IntPtr.Zero;
+                }
+            }
+            catch
+            {
+                streamPtr = IntPtr.Zero;
+            }
+
+            string? targetStoreId = _currentStoreId;
+
+            var thread = new Thread(() =>
+            {
+                Outlook.Application? bgOutlookApp = null;
+                try
+                {
+                    if (streamPtr != IntPtr.Zero)
+                    {
+                        try
+                        {
+                            int hr = CoGetInterfaceAndReleaseStream(streamPtr, in IID_IUnknown, out object unk);
+                            if (hr == 0 && unk is Outlook.Application app)
+                            {
+                                bgOutlookApp = app;
+                            }
+                        }
+                        catch
+                        {
+                            bgOutlookApp = null;
+                        }
+                    }
+
+                    if (bgOutlookApp == null)
+                    {
+                        try
+                        {
+                            bgOutlookApp = new Outlook.Application();
+                        }
+                        catch { }
+                    }
+
+                    if (bgOutlookApp == null || cancellationToken.IsCancellationRequested)
+                        return;
+
+                    Addin.Log("Background folder refresh started.");
+                    var freshRoots = OutlookFolderService.FetchFolderSnapshots(bgOutlookApp, targetStoreId, cancellationToken);
+
+                    if (cancellationToken.IsCancellationRequested || freshRoots == null || freshRoots.Count == 0)
+                        return;
+
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (cancellationToken.IsCancellationRequested || !IsLoaded)
+                            return;
+
+                        ReconcileFolderTree(freshRoots);
+                        Addin.Log("Background folder refresh completed and reconciled.");
+                    }), System.Windows.Threading.DispatcherPriority.Background);
+                }
+                catch (Exception ex)
+                {
+                    Addin.Log($"Error in background folder refresh: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"Error in background folder refresh: {ex.Message}");
+                }
+                finally
+                {
+                    if (bgOutlookApp != null)
+                    {
+                        try
+                        {
+                            Marshal.ReleaseComObject(bgOutlookApp);
+                        }
+                        catch { }
+                    }
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "Move2Folder-BackgroundRefresh"
+            };
+
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+        }
+
+        private void ReconcileFolderTree(List<FolderSnapshot> freshRoots)
+        {
+            if (freshRoots == null || freshRoots.Count == 0)
+                return;
+
+            FolderItem? selected = _selectedFolder;
+
+            FolderTreeReconciler.Reconcile(
+                _roots,
+                _flatList,
+                freshRoots,
+                ref selected,
+                onCacheItemAdded: item => _folderService.UpdateCacheOnItemAdded(item),
+                onCacheItemRemoved: item => _folderService.UpdateCacheOnItemRemoved(item),
+                onSelectedFolderChanged: item =>
+                {
+                    if (item != null)
+                    {
+                        SelectFolderInTree(item);
+                    }
+                    else
+                    {
+                        _selectedFolder = null;
+                        TxtSelectedPath.Text = LocalizationService.NoFolderSelected;
+                        BtnMove.IsEnabled = false;
+                        BtnOpenOnly.IsEnabled = false;
+                    }
+                });
+
+            _selectedFolder = selected;
+            if (_selectedFolder != null)
+            {
+                TxtSelectedPath.Text = _selectedFolder.DisplayPath;
+                if (!string.IsNullOrEmpty(_settings.LastFolderEntryId) &&
+                    string.Equals(_settings.LastFolderEntryId, _selectedFolder.EntryId, StringComparison.OrdinalIgnoreCase))
+                {
+                    _settings.LastFolderPath = _selectedFolder.FullPath;
+                }
+            }
+
+            // Refresh matching highlights if search box has content
+            RefreshSearchMatches();
+        }
+
+        private void RefreshSearchMatches()
+        {
+            string query = SearchTextBox.Text.Trim();
+            if (string.IsNullOrEmpty(query))
+                return;
+
+            var matches = _flatList
+                .Where(f => !f.IsStore && (string.IsNullOrEmpty(_currentStoreId) || string.Equals(f.StoreId, _currentStoreId, StringComparison.OrdinalIgnoreCase)) && (
+                    f.Name.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+                    f.DisplayPath.Contains(query, StringComparison.OrdinalIgnoreCase)))
+                .OrderBy(f =>
+                {
+                    if (f.Name.StartsWith(query, StringComparison.OrdinalIgnoreCase)) return 0;
+                    if (f.Name.Contains(query, StringComparison.OrdinalIgnoreCase)) return 1;
+                    return 2;
+                })
+                .ThenBy(f => f.Name.Length)
+                .ToList();
+
+            var matchSet = new HashSet<FolderItem>(matches);
+            foreach (var f in _flatList)
+            {
+                f.IsMatching = matchSet.Contains(f);
+            }
+        }
+
+        #endregion
     }
 }

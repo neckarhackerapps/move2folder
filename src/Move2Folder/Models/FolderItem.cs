@@ -9,14 +9,67 @@ namespace Move2Folder.Models
         private bool _isExpanded;
         private bool _isSelected;
         private bool _isMatching;
+        private string _name = string.Empty;
+        private string _fullPath = string.Empty;
+        private string _displayPath = string.Empty;
+        private string _folderType = "Folder";
 
         public string EntryId { get; set; } = string.Empty;
         public string StoreId { get; set; } = string.Empty;
-        public string Name { get; set; } = string.Empty;
-        public string FullPath { get; set; } = string.Empty;
-        public string DisplayPath { get; set; } = string.Empty;
+
+        public string Name
+        {
+            get => _name;
+            set
+            {
+                if (_name != value)
+                {
+                    _name = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public string FullPath
+        {
+            get => _fullPath;
+            set
+            {
+                if (_fullPath != value)
+                {
+                    _fullPath = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
+        public string DisplayPath
+        {
+            get => _displayPath;
+            set
+            {
+                if (_displayPath != value)
+                {
+                    _displayPath = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
+
         public bool IsStore { get; set; }
-        public string FolderType { get; set; } = "Folder"; // "Store", "Inbox", "Sent", "Archive", "Folder", etc.
+
+        public string FolderType
+        {
+            get => _folderType;
+            set
+            {
+                if (_folderType != value)
+                {
+                    _folderType = value;
+                    OnPropertyChanged();
+                }
+            }
+        }
 
         public FolderItem? Parent { get; set; }
         public ObservableCollection<FolderItem> Children { get; } = new ObservableCollection<FolderItem>();
